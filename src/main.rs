@@ -1,6 +1,6 @@
-use std::num::{NonZeroU64, NonZeroU8};
+use std::num::{NonZeroU64, NonZeroUsize};
 
-use clap::{AppSettings, ErrorKind, IntoApp, Parser};
+use clap::{AppSettings, Parser};
 use reqwest::{
     self,
     header::{self, HeaderMap, HeaderValue},
@@ -9,7 +9,9 @@ use reqwest::{
 use serde::Deserialize;
 use tokio::time::{sleep, Duration};
 
-const DELAY: Duration = Duration::from_millis(200);
+const DELAY: Duration = Duration::from_millis(500);
+
+type Snowflake = NonZeroU64;
 
 #[derive(Debug, Deserialize)]
 struct Message {
@@ -44,7 +46,7 @@ async fn discord(req: impl Fn() -> RequestBuilder) -> reqwest::Result<reqwest::R
 )]
 struct Args {
     #[clap(help = "The id of the channel")]
-    channel_id: NonZeroU64,
+    channel_id: Snowflake,
 
     #[clap(
         help = "The emoji to react with. Custom emojis are of the format `name:id`.",
@@ -58,7 +60,10 @@ struct Args {
         long,
         default_value = "5"
     )]
-    limit: NonZeroU8,
+    limit: NonZeroUsize,
+
+    #[clap(help = "The id of the message to start reacting from.", short, long)]
+    starting_message: Option<Snowflake>,
 
     #[clap(
         help = "The Discord token to use.",
@@ -77,14 +82,9 @@ async fn main() -> reqwest::Result<()> {
         channel_id,
         emoji,
         limit,
+        starting_message,
         token,
     } = Args::parse();
-
-    if limit.get() > 100 {
-        Args::into_app()
-            .error(ErrorKind::InvalidValue, "limit must be ≤ 100")
-            .exit();
-    }
 
     let mut headers = HeaderMap::new();
     let _ = headers.insert(header::AUTHORIZATION, token);
@@ -96,21 +96,46 @@ async fn main() -> reqwest::Result<()> {
         "https://discord.com/api/v9/channels/{}/messages",
         channel_id
     );
-    for message in discord(|| client.get(&messages_path).query(&[("limit", limit)]))
-        .await?
-        .json::<Vec<Message>>()
-        .await?
-    {
-        let _ = discord(|| {
-            client
-                .put(format!(
-                    "{}/{}/reactions/{}/@me",
-                    messages_path, message.id, emoji
-                ))
-                .header(header::CONTENT_LENGTH, 0)
-        })
-        .await?;
-        sleep(DELAY).await;
+
+    let mut limit = limit.get();
+    let mut before = None;
+
+    macro_rules! react {
+        ($msg:expr) => {
+            let _ = discord(|| {
+                client
+                    .put(format!(
+                        "{}/{}/reactions/{}/@me",
+                        messages_path, $msg, emoji
+                    ))
+                    .header(header::CONTENT_LENGTH, 0)
+            })
+            .await?;
+            sleep(DELAY).await;
+            limit -= 1;
+            before = Some($msg);
+        };
+    }
+
+    if let Some(start) = starting_message {
+        react!(start.to_string());
+    }
+
+    while limit > 0 {
+        let mut query = vec![("limit", limit.min(100).to_string())];
+        if let Some(before) = before {
+            query.push(("before", before))
+        }
+        before = None; // make borrowck happy
+        for message in discord(|| client.get(&messages_path).query(&query))
+            .await?
+            .json::<Vec<Message>>()
+            .await?
+            .into_iter()
+            .map(|m| m.id)
+        {
+            react!(message);
+        }
     }
 
     Ok(())
