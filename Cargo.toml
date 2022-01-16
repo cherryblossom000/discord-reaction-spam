@@ -1,6 +1,6 @@
 [package]
 name = "discord-reaction-spam"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["cherryblossom <cherryblossom0001234@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -8,6 +8,5 @@ description = "React to the most recent messages in a Discord channel"
 
 [dependencies]
 clap = { version = "^3.0.5", features = ["cargo", "derive", "env", "wrap_help"] }
-reqwest = { version = "^0.11.8", features = ["json"] }
 serde = { version = "^1.0.133", features = ["derive"] }
-tokio = { version = "^1.15.0", features = ["macros", "rt-multi-thread", "time"] }
+ureq = { version = "^2.4.0", features = ["json"] }

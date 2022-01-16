@@ -1,17 +1,17 @@
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    thread::sleep,
+    time::Duration,
+};
 
 use clap::{AppSettings, Parser};
-use reqwest::{
-    self,
-    header::{self, HeaderMap, HeaderValue},
-    RequestBuilder, StatusCode,
-};
 use serde::Deserialize;
-use tokio::time::{sleep, Duration};
 
 const DELAY: Duration = Duration::from_millis(500);
 
 type Snowflake = NonZeroU64;
+type Error = Box<dyn std::error::Error>;
+type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Deserialize)]
 struct Message {
@@ -23,18 +23,19 @@ struct RateLimitResponse {
     retry_after: f64,
 }
 
-async fn discord(req: impl Fn() -> RequestBuilder) -> reqwest::Result<reqwest::Response> {
+fn discord(req: ureq::Request, token: &str) -> Result<ureq::Response> {
+    let req = req.set("Authorization", token);
     let mut res;
     loop {
-        res = req().send().await?;
-        if res.status() != StatusCode::TOO_MANY_REQUESTS {
+        res = req.clone().call()?;
+        if res.status() != 429 {
             break;
         }
-        let delay = (res.json::<RateLimitResponse>().await?.retry_after * 1000.) as u64;
+        let delay = (res.into_json::<RateLimitResponse>()?.retry_after * 1000.) as u64;
         eprintln!("rate limited, waiting {} ms", delay);
-        sleep(Duration::from_millis(delay)).await;
+        sleep(Duration::from_millis(delay));
     }
-    res.error_for_status()
+    Ok(res)
 }
 
 #[derive(Parser, Debug)]
@@ -73,11 +74,10 @@ struct Args {
         env = "DISCORD_TOKEN",
         hide_env_values = true
     )]
-    token: HeaderValue,
+    token: String,
 }
 
-#[tokio::main]
-async fn main() -> reqwest::Result<()> {
+fn main() -> Result<()> {
     let Args {
         channel_id,
         emoji,
@@ -85,12 +85,6 @@ async fn main() -> reqwest::Result<()> {
         starting_message,
         token,
     } = Args::parse();
-
-    let mut headers = HeaderMap::new();
-    let _ = headers.insert(header::AUTHORIZATION, token);
-    let client = reqwest::Client::builder()
-        .default_headers(headers)
-        .build()?;
 
     let messages_path = format!(
         "https://discord.com/api/v9/channels/{}/messages",
@@ -102,16 +96,15 @@ async fn main() -> reqwest::Result<()> {
 
     macro_rules! react {
         ($msg:expr) => {
-            let _ = discord(|| {
-                client
-                    .put(format!(
-                        "{}/{}/reactions/{}/@me",
-                        messages_path, $msg, emoji
-                    ))
-                    .header(header::CONTENT_LENGTH, 0)
-            })
-            .await?;
-            sleep(DELAY).await;
+            let _ = discord(
+                ureq::put(&format!(
+                    "{}/{}/reactions/{}/@me",
+                    messages_path, $msg, emoji
+                ))
+                .set("Content-Length", "0"),
+                &token,
+            )?;
+            sleep(DELAY);
             limit -= 1;
             before = Some($msg);
         };
@@ -122,20 +115,23 @@ async fn main() -> reqwest::Result<()> {
     }
 
     while limit > 0 {
-        let mut query = vec![("limit", limit.min(100).to_string())];
-        if let Some(before) = before {
-            query.push(("before", before))
-        }
-        before = None; // make borrowck happy
-        for message in discord(|| client.get(&messages_path).query(&query))
-            .await?
-            .json::<Vec<Message>>()
-            .await?
-            .into_iter()
-            .map(|m| m.id)
-        {
-            react!(message);
-        }
+        discord(
+            {
+                let req = ureq::get(&messages_path).query("limit", &limit.min(100).to_string());
+                if let Some(ref before) = before {
+                    req.query("before", before)
+                } else {
+                    req
+                }
+            },
+            &token,
+        )?
+        .into_json::<Vec<Message>>()?
+        .into_iter()
+        .try_for_each(|m| {
+            react!(m.id);
+            Ok::<_, Error>(())
+        })?;
     }
 
     Ok(())
