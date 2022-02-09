@@ -96,17 +96,18 @@ fn main() -> Result<()> {
 
     macro_rules! react {
         ($msg:expr) => {
+            let msg = $msg;
             let _ = discord(
                 ureq::put(&format!(
                     "{}/{}/reactions/{}/@me",
-                    messages_path, $msg, emoji
+                    messages_path, msg, emoji
                 ))
                 .set("Content-Length", "0"),
                 &token,
             )?;
             sleep(DELAY);
             limit -= 1;
-            before = Some($msg);
+            before = Some(msg);
         };
     }
 
